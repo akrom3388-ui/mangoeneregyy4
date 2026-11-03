@@ -1,0 +1,32 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "main", "master", "основной" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodni yuklab olish
+        uses: actions/checkout@v4
+
+      - name: Java 17 o'rnatish
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Gradle sozlash
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: APK yig'ish (Build)
+        run: gradle assembleDebug
+
+      - name: Tayyor APK faylni saqlash
+        uses: actions/upload-artifact@v4
+        with:
+          name: tayyor-apk
+          path: app/build/outputs/apk/debug/*.apk
