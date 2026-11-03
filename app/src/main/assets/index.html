@@ -1,0 +1,143 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#e8eefc;font-family:sans-serif;padding-bottom:70px}
+header{padding:14px 16px;background:#0f1a2e;display:flex;justify-content:space-between;align-items:center}
+header b{font-size:18px}.live{font-size:13px;padding:4px 10px;border-radius:12px;background:#1b2740}
+.ok{color:#4ade80}.bad{color:#f87171}
+.card{background:#151f33;border-radius:16px;margin:10px 12px;padding:14px}
+.big{font-size:44px;font-weight:700}.sm{color:#93a4c4;font-size:13px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 12px}.grid .card{margin:0}
+.v{font-size:26px;font-weight:700}
+.chip{display:inline-block;background:#14532d;color:#86efac;border-radius:14px;padding:6px 12px;margin:3px}
+.off{background:#1f2937;color:#9ca3af}
+button{background:#1f2a44;color:#e8eefc;border:0;border-radius:10px;padding:12px 16px;font-size:16px;margin:4px 4px 4px 0}
+button.on{background:#0284c7}.red{background:#b91c1c;width:100%}
+table{width:100%;border-collapse:collapse}td,th{padding:7px 4px;text-align:left;border-bottom:1px solid #22304d;font-size:14px}
+input,select{width:100%;padding:11px;border-radius:10px;border:1px solid #2a3a5c;background:#0b1220;color:#fff;font-size:15px;margin:3px 0 10px}
+label{font-size:13px;color:#93a4c4}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#0f1a2e;border-top:1px solid #22304d}
+nav div{flex:1;text-align:center;padding:12px 0;font-size:13px;color:#93a4c4}nav div.a{color:#38bdf8;font-weight:700}
+#toast{position:fixed;top:70px;left:12px;right:12px;background:#1e293b;padding:10px;border-radius:10px;display:none;z-index:9}
+</style></head><body>
+<header><div><b>🥭 Mango Monitor v2</b><div class="sm" id="sub"></div></div><div class="live" id="live">...</div></header>
+<div id="toast"></div><div id="view"></div>
+<nav id="nav"></nav>
+<script>
+const TABS=[['home','Asosiy'],['ctl','Boshqaruv'],['stat','Statistika'],['dp','Ma\'lumot'],['cfg','Sozlama']];
+let cfg={},def={},status={},tab='home',last=0,online=false,err='';
+let hist=JSON.parse(localStorage.getItem('hist')||'{}'),ses=JSON.parse(localStorage.getItem('ses')||'{"s":0,"kwh":0}');
+const pend={};let seq=0;
+function api(m,p,b){return new Promise(r=>{const id=++seq;pend[id]=r;Android.api(id,m,p,b?JSON.stringify(b):'')})}
+window.onApi=(id,t)=>{const r=pend[id];delete pend[id];try{r(JSON.parse(t))}catch(e){r({success:false,msg:t})}};
+const $=s=>document.querySelector(s);
+const NAMES={temp_current:'Suv harorati',temp_top:'Yuqori (bufer)',temp_set:'Belgilangan',temp_in:'Kirish',temp_out:'Chiqish',temp_outdoor:'Tashqi havo',temp_ambient:'Tashqi havo',temp_bottom:'Pastki (bufer)',compressor_state:'Kompressor',compressor_strength:'Kompressor %',defrost:'Defrost',draught_fan_state:'Ventilyator',ele_heating_state:'Elektr teni',pump_state:'Sirkulyatsiya nasosi',switch:'Nasos (asosiy)',mode:'Rejim'};
+const nm=c=>NAMES[c]||c;
+function scale(c){return def[c]&&def[c].scale||0}
+function val(c){let v=status[c];if(typeof v==='number')return v/Math.pow(10,scale(c));return v}
+function isOn(c){return status[c]===true}
+function load(){try{cfg=JSON.parse(Android.getCfg())}catch(e){cfg={}}}
+async function loadSpec(){
+  if(!cfg.dev)return;
+  const r=await api('GET',`/v1.0/devices/${cfg.dev}/specifications`);
+  if(!r.success){err=r.msg||'spec xato';return}
+  def={};
+  const add=(a,w)=>(a||[]).forEach(x=>{let v={};try{v=JSON.parse(x.values||'{}')}catch(e){}
+    def[x.code]=Object.assign(def[x.code]||{},{type:x.type,w:(def[x.code]&&def[x.code].w)||w},v)});
+  add(r.result.status,false);add(r.result.functions,true);
+}
+async function poll(){
+  if(!cfg.dev||!cfg.secret){return}
+  const r=await api('GET',`/v1.0/devices/${cfg.dev}/status`);
+  if(r.success){status={};r.result.forEach(x=>status[x.code]=x.value);online=true;err='';integrate()}
+  else{online=false;err=r.msg||'xato'}
+  render();
+}
+function power(){
+  if(cfg.powerCode&&status[cfg.powerCode]!=null)return{w:status[cfg.powerCode]*(+cfg.powerMul||1),real:true};
+  const k=+cfg.coef||1;let w=0;
+  if(isOn('compressor_state')||status.compressor_state===true)w+=(+cfg.compW||0)*((+status.compressor_strength||100)/100);
+  if(isOn('pump_state'))w+=+cfg.pumpW||0;
+  if(isOn('draught_fan_state'))w+=+cfg.fanW||0;
+  if(isOn('ele_heating_state'))w+=+cfg.heatW||0;
+  if(!w&&status.switch===true)w=+cfg.idleW||0;
+  return{w:w*k,real:false};
+}
+const day=()=>new Date().toISOString().slice(0,10);
+function integrate(){
+  const now=Date.now();
+  if(last){const dt=Math.min((now-last)/1000,60);const p=power().w;const k=p*dt/3.6e6;
+    const h=hist[day()]||(hist[day()]={kwh:0,comp:0});h.kwh+=k;
+    if(status.compressor_state===true)h.comp+=dt/3600;
+    ses.kwh+=k;ses.s+=dt;
+    localStorage.setItem('hist',JSON.stringify(hist));localStorage.setItem('ses',JSON.stringify(ses))}
+  last=now;
+}
+function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';setTimeout(()=>e.style.display='none',3500)}
+async function send(code,v){
+  const r=await api('POST',`/v1.0/devices/${cfg.dev}/commands`,{commands:[{code,value:v}]});
+  toast(r.success?'Yuborildi: '+code+' = '+v:'Rad etildi: '+(r.msg||JSON.stringify(r)));
+  setTimeout(poll,1200);
+}
+function sendInt(code,v){send(code,Math.round(v*Math.pow(10,scale(code))))}
+const f1=x=>Math.round(x*100)/100;
+function home(){
+  const p=power(),t=hist[day()]||{kwh:0,comp:0};
+  const mon=Object.keys(hist).filter(k=>k.slice(0,7)==day().slice(0,7)).reduce((s,k)=>s+hist[k].kwh,0);
+  const temps=Object.keys(status).filter(c=>/temp/.test(c)&&c!=='temp_set');
+  const gers=Object.keys(status).find(c=>/freq|hz|gers|rpm/i.test(c));
+  const parts=['compressor_state','pump_state','draught_fan_state','ele_heating_state','defrost'].filter(c=>c in status);
+  const price=+cfg.price||0;
+  return `<div class="card"><div class="sm">Hozirgi quvvat ${p.real?'(o\'lchangan)':'(taxminiy)'}</div>
+  <div class="big">${Math.round(p.w)} <span class="sm">Vt</span></div>
+  <div class="sm">≈ ${f1(p.w/(380*1.732))} A (380V, 3 faza) • ${status.switch?'nasos yoniq':'nasos o\'chiq'}</div></div>
+  <div class="grid">${temps.map(c=>`<div class="card"><div class="sm">${nm(c)}</div><div class="v">${val(c)}°</div>${c==='temp_current'?`<div class="sm">belgilangan ${val('temp_set')}°</div>`:''}</div>`).join('')}
+  <div class="card"><div class="sm">Bugun</div><div class="v">${f1(t.kwh)} kWh</div><div class="sm">${price?Math.round(t.kwh*price)+' so\'m':''}</div></div>
+  <div class="card"><div class="sm">Shu oy</div><div class="v">${f1(mon)} kWh</div><div class="sm">${price?Math.round(mon*price)+' so\'m':''}</div></div></div>
+  <div class="card"><div class="sm">Ishlayotgan qismlar</div>
+  ${parts.map(c=>`<span class="chip ${status[c]===true?'':'off'}">${nm(c)}${c==='compressor_state'&&status.compressor_strength!=null?' '+status.compressor_strength+'%':''}</span>`).join('')}
+  ${gers?`<div class="v">Kompressor: ${val(gers)} (${gers})</div>`:''}
+  <div class="sm">Bugun kompressor ${f1(t.comp)} soat</div></div>
+  <div class="card"><button class="red" onclick="send('switch',${!status.switch})">${status.switch?'Nasosni o\'chirish':'Nasosni yoqish'}</button></div>`;
+}
+function ctl(){
+  const codes=Object.keys(def).filter(c=>def[c].w);
+  return `<div class="card sm">Qurilma qabul qiladigan barcha buyruqlar (Tuya spetsifikatsiyasidan avtomatik).</div>`+codes.map(c=>{
+    const d=def[c];let h='';
+    if(d.type==='Boolean')h=`<button class="${status[c]===true?'on':''}" onclick="send('${c}',true)">Yoqish</button><button class="${status[c]===false?'on':''}" onclick="send('${c}',false)">O'chirish</button>`;
+    else if(d.type==='Enum')h=(d.range||[]).map(v=>`<button class="${status[c]===v?'on':''}" onclick="send('${c}','${v}')">${v}</button>`).join('');
+    else if(d.type==='Integer'){const s=Math.pow(10,d.scale||0);let mx=d.max/s,mn=d.min/s,st=(d.step||1)/s;
+      if(c==='temp_set'&&+cfg.tmax)mx=+cfg.tmax;
+      const cur=val(c);h=`<button onclick="sendInt('${c}',Math.max(${mn},${cur}-${st}))">−</button><b style="font-size:26px"> ${cur} </b><button onclick="sendInt('${c}',Math.min(${mx},${cur}+${st}))">+</button><span class="sm"> ${mn} … ${mx}</span>`}
+    else h=`<span class="sm">${d.type} • ${status[c]}</span>`;
+    return `<div class="card"><b>${nm(c)}</b> <span class="sm">(${c})</span><div>${h}</div></div>`}).join('');
+}
+function stat(){
+  const ks=Object.keys(hist).sort().reverse().slice(0,30),price=+cfg.price||0;
+  const tot=ks.reduce((s,k)=>s+hist[k].kwh,0);
+  return `<div class="card"><div class="sm">So'nggi 30 kun jami</div><div class="v">${f1(tot)} kWh</div></div>
+  <div class="card"><table><tr><th>Sana</th><th>kWh</th><th>Kompr. soat</th><th>So'm</th></tr>
+  ${ks.map(k=>`<tr><td>${k.slice(5)}</td><td>${f1(hist[k].kwh)}</td><td>${f1(hist[k].comp)}</td><td>${price?Math.round(hist[k].kwh*price):''}</td></tr>`).join('')}</table>
+  <div class="sm">Eslatma: ilova ochiq/ishlab turgandagina yig'iladi. Aniqroq hisob uchun Tuya hisoblagich DP kodini Sozlamada kiriting.</div></div>`;
+}
+function dp(){
+  const all=[...new Set([...Object.keys(def),...Object.keys(status)])];
+  return `<div class="card"><table><tr><th>Kod</th><th>Tur</th><th>Qiymat</th></tr>${all.map(c=>`<tr><td>${c}${def[c]&&def[c].w?' ✎':''}</td><td>${def[c]?def[c].type:'-'}${def[c]&&def[c].max!=null?' ≤'+def[c].max:''}</td><td>${status[c]}</td></tr>`).join('')}</table>
+  <div class="sm">✎ = boshqarish mumkin. Quvvat/gers/harorat datchigi kodi shu yerda bo'lsa, Sozlamada kiriting.</div></div>`;
+}
+const FIELDS=[['id','Access ID'],['secret','Access Secret','password'],['dev','Device ID'],['region','Region (eu/us/cn/in)'],['compW','Kompressor quvvati (Vt)'],['heatW','Elektr teni (Vt)'],['pumpW','Sirkulyatsiya nasosi (Vt)'],['fanW','Ventilyator (Vt)'],['idleW','Kutish rejimi (Vt)'],['coef','Kalibrlash koeffitsiyenti'],['price','1 kWh narxi (so\'m)'],['tmax','Harorat maks. (75 yozing)'],['powerCode','Haqiqiy quvvat DP kodi (bo\'lsa)'],['powerMul','Quvvat DP ko\'paytiruvchi (masalan 0.1)']];
+function cfgv(){return `<div class="card">${FIELDS.map(([k,l,t])=>`<label>${l}</label><input id="f_${k}" type="${t||'text'}" value="${(cfg[k]??'')}">`).join('')}
+<button class="on" onclick="saveCfg()">Saqlash</button><button onclick="localStorage.clear();toast('Tarix tozalandi')">Tarixni tozalash</button></div>`}
+async function saveCfg(){FIELDS.forEach(([k])=>{cfg[k]=$('#f_'+k).value.trim()});if(!cfg.region)cfg.region='eu';
+  Android.setCfg(JSON.stringify(cfg));toast('Saqlandi');await loadSpec();poll()}
+function render(){
+  $('#live').innerHTML=online?'<span class="ok">● jonli</span>':'<span class="bad">● aloqa yo\'q</span>';
+  $('#sub').textContent=err||(cfg.dev?'Device '+cfg.dev.slice(0,8)+'…':'Sozlamani to\'ldiring');
+  $('#nav').innerHTML=TABS.map(([k,l])=>`<div class="${tab===k?'a':''}" onclick="tab='${k}';render()">${l}</div>`).join('');
+  if(tab==='cfg'&&document.activeElement&&document.activeElement.tagName==='INPUT')return;
+  $('#view').innerHTML={home,ctl,stat,dp,cfg:cfgv}[tab]();
+}
+(async()=>{load();if(!cfg.region)cfg.region='eu';if(!cfg.tmax)cfg.tmax=75;
+  if(!cfg.compW)cfg.compW=7700;if(!cfg.pumpW)cfg.pumpW=100;if(!cfg.fanW)cfg.fanW=200;
+  if(!cfg.id)tab='cfg';render();await loadSpec();await poll();setInterval(poll,5000)})();
+</script></body></html>
